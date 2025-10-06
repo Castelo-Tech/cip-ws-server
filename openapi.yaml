@@ -1,0 +1,693 @@
+openapi: 3.0.3
+info:
+  title: WhatsApp WebJS API
+  version: 1.0.0
+  description: |
+    This specification documents a REST API built on top of the
+    **whatsapp‑web.js** library.  It allows managing up to five independent
+    WhatsApp sessions, performing CRUDL operations on those sessions and
+    interacting with chats, messages, contacts and media.  Incoming messages
+    can be forwarded to a configurable webhook per session.  The API
+    returns JSON encoded responses and uses standard HTTP status codes to
+    signal success or failure.  All endpoints are prefixed off the base
+    server URL.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+
+components:
+  schemas:
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique identifier of the session
+        status:
+          type: string
+          description: Current lifecycle state of the client
+          enum: [initializing, qr, authenticated, ready, disconnected, failed]
+        qr:
+          type: string
+          nullable: true
+          description: Latest QR code string if awaiting authentication
+        webhook:
+          type: string
+          nullable: true
+          description: URL used to forward incoming messages for this session
+    ChatSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Chat identifier
+        name:
+          type: string
+        isGroup:
+          type: boolean
+        unreadCount:
+          type: integer
+    ContactSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        number:
+          type: string
+        isUser:
+          type: boolean
+        isGroup:
+          type: boolean
+        isBusiness:
+          type: boolean
+    ContactDetail:
+      allOf:
+        - $ref: '#/components/schemas/ContactSummary'
+        - type: object
+          properties:
+            pushname:
+              type: string
+              nullable: true
+            about:
+              type: string
+              nullable: true
+            profilePicUrl:
+              type: string
+              nullable: true
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+        from:
+          type: string
+        to:
+          type: string
+        body:
+          type: string
+        type:
+          type: string
+        timestamp:
+          type: integer
+          description: Unix timestamp
+        fromMe:
+          type: boolean
+        hasMedia:
+          type: boolean
+        quotedId:
+          type: string
+          nullable: true
+        media:
+          type: object
+          nullable: true
+          properties:
+            filename:
+              type: string
+            mimetype:
+              type: string
+            filesize:
+              type: integer
+            url:
+              type: string
+    SendMessageRequest:
+      type: object
+      required: [to, message]
+      properties:
+        to:
+          type: string
+          description: Destination phone number or chat identifier
+        message:
+          type: string
+          description: Text to send
+        options:
+          type: object
+          description: Additional send options (e.g. mentions, quoted message id)
+    SendMediaRequest:
+      type: object
+      required: [to]
+      properties:
+        to:
+          type: string
+          description: Destination phone number or chat identifier
+        caption:
+          type: string
+          nullable: true
+        media:
+          type: object
+          properties:
+            mimetype:
+              type: string
+            filename:
+              type: string
+              nullable: true
+            data:
+              type: string
+              description: Base64 encoded payload (no data URI prefix)
+
+paths:
+  /:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Server is running
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: string
+  /sessions:
+    get:
+      summary: List all sessions
+      responses:
+        '200':
+          description: Array of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+    post:
+      summary: Create a new session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  description: Unique session identifier
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          description: Invalid request or maximum sessions reached
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+  /sessions/{id}:
+    get:
+      summary: Get session details
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+    delete:
+      summary: Delete a session and remove associated auth data
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        '404':
+          description: Session not found
+  /sessions/{id}/qr:
+    get:
+      summary: Get the current QR code string for authentication
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: QR code information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  qr:
+                    type: string
+                    nullable: true
+        '404':
+          description: Session not found
+  /sessions/{id}/webhook:
+    post:
+      summary: Register a webhook URL for incoming messages
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+      responses:
+        '200':
+          description: Webhook registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  webhook:
+                    type: string
+        '404':
+          description: Session not found
+    delete:
+      summary: Remove the webhook configuration
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Webhook removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        '404':
+          description: Session not found
+  /sessions/{id}/chats:
+    get:
+      summary: List chats for a session
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Array of chat summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChatSummary'
+        '404':
+          description: Session not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/chats/{chatId}/messages:
+    get:
+      summary: Fetch messages from a chat
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: chatId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+      responses:
+        '200':
+          description: Array of messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+        '404':
+          description: Session or chat not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/messages:
+    post:
+      summary: Send a text message
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '200':
+          description: Message queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  timestamp:
+                    type: integer
+        '400':
+          description: Invalid input
+        '404':
+          description: Session not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/media:
+    post:
+      summary: Send a media message
+      description: |
+        Send images, audio, video, stickers or documents to a chat.  Use
+        multipart/form‑data with a `file` field to upload binary content, or
+        send a JSON body containing a base64 encoded media object.  The
+        `to` field is required; an optional `caption` may be provided.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [to, file]
+              properties:
+                to:
+                  type: string
+                caption:
+                  type: string
+                  nullable: true
+                file:
+                  type: string
+                  format: binary
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMediaRequest'
+      responses:
+        '200':
+          description: Media queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  timestamp:
+                    type: integer
+        '400':
+          description: Invalid input
+        '404':
+          description: Session not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/messages/{messageId}/media:
+    get:
+      summary: Download media attached to a message
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: messageId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Media details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  filename:
+                    type: string
+                  mimetype:
+                    type: string
+                  filesize:
+                    type: integer
+                  data:
+                    type: string
+                    description: Base64 encoded file
+        '404':
+          description: Session or message not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/contacts:
+    get:
+      summary: List contacts
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Array of contacts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ContactSummary'
+        '404':
+          description: Session not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/contacts/{contactId}:
+    get:
+      summary: Get contact details
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: contactId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Contact information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContactDetail'
+        '404':
+          description: Session or contact not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/pin-message:
+    post:
+      summary: Pin or unpin a message
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messageId, pin]
+              properties:
+                messageId:
+                  type: string
+                pin:
+                  type: boolean
+                  description: Set to true to pin, false to unpin
+                duration:
+                  type: integer
+                  nullable: true
+                  description: Duration in seconds to keep the message pinned
+      responses:
+        '200':
+          description: Result of pin/unpin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pinned:
+                    type: boolean
+        '404':
+          description: Session or message not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/react-message:
+    post:
+      summary: React to a message with an emoji
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messageId, reaction]
+              properties:
+                messageId:
+                  type: string
+                reaction:
+                  type: string
+                  description: Emoji to react with
+      responses:
+        '200':
+          description: Reaction applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        '404':
+          description: Session or message not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/status:
+    post:
+      summary: Update the user status message
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        '404':
+          description: Session not found
+        '409':
+          description: Session not ready
+  /sessions/{id}/forward-message:
+    post:
+      summary: Forward a message to another chat
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messageId, to]
+              properties:
+                messageId:
+                  type: string
+                to:
+                  type: string
+                  description: Destination number or chat id
+      responses:
+        '200':
+          description: Message forwarded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        '404':
+          description: Session or message not found
+        '409':
+          description: Session not ready
