@@ -99,11 +99,18 @@ export function createChatRoutes(sessionManager, io) {
     if (!req.file) {
       return res.status(400).json({ error: 'Audio file is required' });
     }
+
+    // Guard against tiny/aborted blobs that ffmpeg cannot parse reliably
+    if (req.file.size < 3000) {
+      return res.status(400).json({ error: 'Voice note too short — please record a bit longer.' });
+    }
     
     try {
       // Convert buffer to base64
       const audioData = req.file.buffer.toString('base64');
-      const message = await chatManager.sendVoiceNote(accountId, label, chatId, audioData);
+      // Pass the real mime to the converter/manager (keeps backward-compat with default)
+      const originalMime = req.file.mimetype || 'audio/webm';
+      const message = await chatManager.sendVoiceNote(accountId, label, chatId, audioData, originalMime);
       res.json(message);
     } catch (error) {
       console.error('Voice note upload error:', error);
