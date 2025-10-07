@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh — one-shot provisioning for GCP VM. Run from repo root.
+# setup.sh — simplest one-shot (no env files). Run from repo root.
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -36,7 +36,7 @@ else
   npm --prefix "$REPO_DIR" install
 fi
 
-# Ensure runtime data dirs exist
+# Ensure runtime data dirs exist and are owned by the service user (root here)
 mkdir -p "$REPO_DIR/.wwebjs_auth" "$REPO_DIR/.wwebjs_cache"
 chown -R root:root "$REPO_DIR/.wwebjs_auth" "$REPO_DIR/.wwebjs_cache"
 
@@ -59,15 +59,20 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=${REPO_DIR}
+# Keep your current entrypoint
 ExecStart=/usr/bin/npm run start --silent
+# Make sure data dirs exist before starting
 ExecStartPre=/usr/bin/mkdir -p ${REPO_DIR}/.wwebjs_auth ${REPO_DIR}/.wwebjs_cache
 ExecStartPre=/usr/bin/chown -R root:root ${REPO_DIR}/.wwebjs_auth ${REPO_DIR}/.wwebjs_cache
+# Graceful shutdown + resiliency
 KillSignal=SIGINT
 TimeoutStopSec=20
 Restart=always
 RestartSec=3
+# Useful env
 Environment=NODE_ENV=production
 Environment=PUPPETEER_SKIP_DOWNLOAD=false
+# Give Puppeteer/WS more file descriptors
 LimitNOFILE=65535
 
 [Install]
