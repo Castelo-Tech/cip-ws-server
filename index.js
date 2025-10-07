@@ -5,6 +5,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { SessionManager } from './lib/sessions/sessionManager.js';
 import { createSessionRoutes } from './routes/sessionRoutes.js';
 import { createChatRoutes } from './routes/chatRoutes.js';
+import { createContactRoutes } from './routes/contactRoutes.js';
 
 
 const app = express();
@@ -41,10 +42,12 @@ const sessionManager = new SessionManager();
 
 // Setup routes with io instance
 const sessionRoutes = createSessionRoutes(sessionManager, io);
-app.use('/api', sessionRoutes);
-
 const chatRoutes = createChatRoutes(sessionManager, io);
+
+app.use('/api', sessionRoutes);
 app.use('/api', chatRoutes);
+app.use('/api', createContactRoutes(sessionManager));
+
 
 // Health check
 app.get('/api/health', (req, res) => {
