@@ -1,54 +1,20 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { ensureMediaCacheDir, memGet, memSet, diskLoad, diskSave } from '../lib/utils/mediaCache.js';
+import { sendBufferWithRange } from '../lib/utils/httpRange.js';
 
-const upload = multer({ 
+const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
+  limits: { fileSize: 50 * 1024 * 1024 }
 });
 
 export function createChatRoutes(sessionManager, io) {
   const router = Router();
   const chatManager = sessionManager.getChatManager();
 
-  // --- Disk cache for media (persists across process restarts) ---
-  const MEDIA_DIR = join(process.cwd(), '.media_cache');
-  if (!existsSync(MEDIA_DIR)) mkdirSync(MEDIA_DIR, { recursive: true });
+  // Ensure .media_cache exists
+  ensureMediaCacheDir();
 
-  function diskPathFor(messageId) {
-    // store as: .media_cache/<messageId>.<ext or bin>
-    return join(MEDIA_DIR, messageId);
-  }
-  function loadFromDisk(messageId) {
-    const base = diskPathFor(messageId);
-    if (!existsSync(base)) return null;
-    try {
-      const meta = JSON.parse(readFileSync(base + '.json', 'utf8'));
-      const data = readFileSync(base + '.bin');
-      return { buffer: data, mimetype: meta.mimetype, filename: meta.filename || `media_${messageId}` };
-    } catch {
-      return null;
-    }
-  }
-  function saveToDisk(messageId, buffer, mimetype, filename) {
-    const base = diskPathFor(messageId);
-    writeFileSync(base + '.bin', buffer);
-    writeFileSync(base + '.json', JSON.stringify({ mimetype, filename }, null, 2));
-  }
-
-  // --- Simple in-memory cache (short TTL) for fast range slicing ---
-  const MEMORY_CACHE = new Map();
-  const TTL = 10 * 60 * 1000; // 10 minutes
-  const getMem = (k) => {
-    const v = MEMORY_CACHE.get(k);
-    if (!v) return null;
-    if (Date.now() - v.ts > TTL) { MEMORY_CACHE.delete(k); return null; }
-    return v;
-  };
-  const setMem = (k, val) => MEMORY_CACHE.set(k, { ...val, ts: Date.now() });
-
-  // Get all chats
   router.get('/sessions/:accountId/:label/chats', async (req, res) => {
     const { accountId, label } = req.params;
     try {
@@ -59,7 +25,6 @@ export function createChatRoutes(sessionManager, io) {
     }
   });
 
-  // Get specific chat
   router.get('/sessions/:accountId/:label/chats/:chatId', async (req, res) => {
     const { accountId, label, chatId } = req.params;
     try {
@@ -70,7 +35,6 @@ export function createChatRoutes(sessionManager, io) {
     }
   });
 
-  // Get messages
   router.get('/sessions/:accountId/:label/chats/:chatId/messages', async (req, res) => {
     const { accountId, label, chatId } = req.params;
     const { limit = 50 } = req.query;
@@ -82,7 +46,6 @@ export function createChatRoutes(sessionManager, io) {
     }
   });
 
-  // Send text
   router.post('/sessions/:accountId/:label/chats/:chatId/messages', async (req, res) => {
     const { accountId, label, chatId } = req.params;
     const { content } = req.body;
@@ -95,7 +58,6 @@ export function createChatRoutes(sessionManager, io) {
     }
   });
 
-  // Send media
   router.post('/sessions/:accountId/:label/chats/:chatId/media', upload.single('media'), async (req, res) => {
     const { accountId, label, chatId } = req.params;
     const { caption } = req.body;
@@ -115,7 +77,6 @@ export function createChatRoutes(sessionManager, io) {
     }
   });
 
-  // Send voice note
   router.post('/sessions/:accountId/:label/chats/:chatId/voice', upload.single('audio'), async (req, res) => {
     const { accountId, label, chatId } = req.params;
     if (!req.file) return res.status(400).json({ error: 'Audio file is required' });
@@ -132,71 +93,41 @@ export function createChatRoutes(sessionManager, io) {
     }
   });
 
-  // Download media (supports Range + disk/memory cache)
+  // Media streaming with memory+disk cache and HTTP range — same behavior, cleaner placement
   router.get('/sessions/:accountId/:label/media/:messageId', async (req, res) => {
     const { accountId, label, messageId } = req.params;
 
     try {
-      // 1) Memory cache?
-      let cached = getMem(messageId);
+      let cached = memGet(messageId);
 
-      // 2) Disk cache?
       if (!cached) {
-        const disk = loadFromDisk(messageId);
+        const disk = diskLoad(messageId);
         if (disk) {
-          cached = { buffer: disk.buffer, mimetype: disk.mimetype, filename: disk.filename };
-          setMem(messageId, cached);
+          cached = disk;
+          memSet(messageId, cached);
         }
       }
 
-      // 3) If still missing, fetch once from WhatsApp and cache both memory+disk
       if (!cached) {
         try {
           const media = await chatManager.downloadMedia(accountId, label, messageId);
           const buffer = Buffer.from(media.data, 'base64');
           cached = { buffer, mimetype: media.mimetype, filename: media.filename || `media_${messageId}` };
-          setMem(messageId, cached);
-          // persist to disk for future (older messages may vanish from WA store)
-          saveToDisk(messageId, buffer, cached.mimetype, cached.filename);
+          memSet(messageId, cached);
+          diskSave(messageId, buffer, cached.mimetype, cached.filename);
         } catch (e) {
-          // if not found in WA (older/expired), but we DO have disk cache → serve that
-          const disk = loadFromDisk(messageId);
+          const disk = diskLoad(messageId);
           if (disk) {
-            cached = { buffer: disk.buffer, mimetype: disk.mimetype, filename: disk.filename };
-            setMem(messageId, cached);
+            cached = disk;
+            memSet(messageId, cached);
           } else {
-            // Graceful: let the client know it's gone, not a server error
             return res.status(410).json({ error: 'Media not available from WhatsApp (expired or not in recent history).' });
           }
         }
       }
 
       const { buffer, mimetype, filename } = cached;
-      const size = buffer.length;
-
-      res.setHeader('Content-Type', mimetype);
-      res.setHeader('Accept-Ranges', 'bytes');
-
-      const range = req.headers.range;
-      if (range) {
-        const m = /^bytes=(\d*)-(\d*)$/.exec(range);
-        if (!m) return res.status(416).end();
-        const start = m[1] ? parseInt(m[1], 10) : 0;
-        const end   = m[2] ? Math.min(parseInt(m[2], 10), size - 1) : size - 1;
-        if (isNaN(start) || isNaN(end) || start > end || start >= size) return res.status(416).end();
-
-        const chunk = buffer.subarray(start, end + 1);
-        res.status(206);
-        res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
-        res.setHeader('Content-Length', String(chunk.length));
-        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
-        return res.end(chunk);
-      }
-
-      res.status(200);
-      res.setHeader('Content-Length', String(size));
-      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
-      res.end(buffer);
+      return sendBufferWithRange(res, buffer, mimetype, filename, req.headers.range);
     } catch (error) {
       console.error('Media download route error:', error);
       res.status(500).json({ error: error.message });
