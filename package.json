@@ -14,6 +14,7 @@
     "puppeteer": "^22.0.0",
     "socket.io": "^4.8.1",
     "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js#main",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "firebase-admin": "^12.5.0"
   }
 }
