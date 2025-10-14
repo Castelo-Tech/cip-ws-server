@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { ensureMediaCacheDir, memGet, memSet, diskLoad, diskSave } from '../lib/utils/mediaCache.js';
 import { sendBufferWithRange } from '../lib/utils/httpRange.js';
+import { assertSessionPermission, handleAuthzError } from '../lib/auth/authorize.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -12,15 +13,16 @@ export function createChatRoutes(sessionManager, io) {
   const router = Router();
   const chatManager = sessionManager.getChatManager();
 
-  // Ensure .media_cache exists
   ensureMediaCacheDir();
 
   router.get('/sessions/:accountId/:label/chats', async (req, res) => {
     const { accountId, label } = req.params;
     try {
+      await assertSessionPermission(accountId, label, req.auth.uid, 'viewMessages');
       const chats = await chatManager.getChats(accountId, label);
       res.json(chats);
     } catch (error) {
+      if (error?.status) return handleAuthzError(res, error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -28,9 +30,11 @@ export function createChatRoutes(sessionManager, io) {
   router.get('/sessions/:accountId/:label/chats/:chatId', async (req, res) => {
     const { accountId, label, chatId } = req.params;
     try {
+      await assertSessionPermission(accountId, label, req.auth.uid, 'viewMessages');
       const chat = await chatManager.getChatById(accountId, label, chatId);
       res.json(chat);
     } catch (error) {
+      if (error?.status) return handleAuthzError(res, error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -39,9 +43,11 @@ export function createChatRoutes(sessionManager, io) {
     const { accountId, label, chatId } = req.params;
     const { limit = 50 } = req.query;
     try {
+      await assertSessionPermission(accountId, label, req.auth.uid, 'viewMessages');
       const messages = await chatManager.getMessages(accountId, label, chatId, parseInt(limit));
       res.json(messages);
     } catch (error) {
+      if (error?.status) return handleAuthzError(res, error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -51,9 +57,11 @@ export function createChatRoutes(sessionManager, io) {
     const { content } = req.body;
     if (!content) return res.status(400).json({ error: 'Message content is required' });
     try {
+      await assertSessionPermission(accountId, label, req.auth.uid, 'createMessages');
       const message = await chatManager.sendMessage(accountId, label, chatId, content);
       res.json(message);
     } catch (error) {
+      if (error?.status) return handleAuthzError(res, error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -63,6 +71,7 @@ export function createChatRoutes(sessionManager, io) {
     const { caption } = req.body;
     if (!req.file) return res.status(400).json({ error: 'Media file is required' });
     try {
+      await assertSessionPermission(accountId, label, req.auth.uid, 'createMessages');
       const mediaData = {
         mimetype: req.file.mimetype,
         data: req.file.buffer.toString('base64'),
@@ -72,6 +81,7 @@ export function createChatRoutes(sessionManager, io) {
       const message = await chatManager.sendMedia(accountId, label, chatId, mediaData);
       res.json(message);
     } catch (error) {
+      if (error?.status) return handleAuthzError(res, error);
       console.error('Media upload error:', error);
       res.status(500).json({ error: error.message });
     }
@@ -83,23 +93,25 @@ export function createChatRoutes(sessionManager, io) {
     if (req.file.size < 3000) return res.status(400).json({ error: 'Voice note too short — please record a bit longer.' });
 
     try {
+      await assertSessionPermission(accountId, label, req.auth.uid, 'createMessages');
       const audioData = req.file.buffer.toString('base64');
       const originalMime = req.file.mimetype || 'audio/webm';
       const message = await chatManager.sendVoiceNote(accountId, label, chatId, audioData, originalMime);
       res.json(message);
     } catch (error) {
+      if (error?.status) return handleAuthzError(res, error);
       console.error('Voice note upload error:', error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  // Media streaming with memory+disk cache and HTTP range — same behavior, cleaner placement
   router.get('/sessions/:accountId/:label/media/:messageId', async (req, res) => {
     const { accountId, label, messageId } = req.params;
 
     try {
-      let cached = memGet(messageId);
+      await assertSessionPermission(accountId, label, req.auth.uid, 'viewMessages');
 
+      let cached = memGet(messageId);
       if (!cached) {
         const disk = diskLoad(messageId);
         if (disk) {
@@ -129,6 +141,7 @@ export function createChatRoutes(sessionManager, io) {
       const { buffer, mimetype, filename } = cached;
       return sendBufferWithRange(res, buffer, mimetype, filename, req.headers.range);
     } catch (error) {
+      if (error?.status) return handleAuthzError(res, error);
       console.error('Media download route error:', error);
       res.status(500).json({ error: error.message });
     }

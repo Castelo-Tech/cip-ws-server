@@ -1,15 +1,11 @@
 import { Router } from 'express';
+import { assertSessionPermission, handleAuthzError } from '../lib/auth/authorize.js';
 
 export function createConversationRoutes(sessionManager, io) {
   const router = Router();
   const chatManager = sessionManager.getChatManager();
   const contactsManager = sessionManager.getContactsManager();
 
-  // Conversations index:
-  // GET /api/sessions/:aid/:label/conversations?search=&onlyContacts=15551234567,521555...
-  // - Uses ChatManager.getChats() (no contact fetch inside)
-  // - Enriches with display info from ContactsManager (one contacts fetch, cached)
-  // - Optional narrowing: only show chats whose user is in onlyContacts list
   router.get('/sessions/:accountId/:label/conversations', async (req, res) => {
     const { accountId, label } = req.params;
     const { search = '', onlyContacts = '', limit } = req.query;
@@ -20,22 +16,23 @@ export function createConversationRoutes(sessionManager, io) {
         .split(',')
         .map(s => s.trim())
         .filter(Boolean)
-        .map(s => s.replace(/[^\d]/g, '')) // normalize to digits
+        .map(s => s.replace(/[^\d]/g, ''))
     );
     const hasAllowList = allowedUsers.size > 0;
     const lim = limit ? parseInt(limit) : undefined;
 
     try {
+      await assertSessionPermission(accountId, label, req.auth.uid, 'viewMessages');
+
       const chats = await chatManager.getChats(accountId, label);
-      const displayMap = await contactsManager.getDisplayMap(accountId, label); // wid -> {name,pushname,user}
+      const displayMap = await contactsManager.getDisplayMap(accountId, label);
 
       let results = chats
         .filter((c) => {
-          // If narrowing is requested, only allow 1:1 chats whose user is in allow list
           if (hasAllowList) {
             if (c.isGroup) return false;
             return allowedUsers.has(String(c.id?.split('@')[0] || '').replace(/[^\d]/g, '')) ||
-                   allowedUsers.has(String(c.lastMessage?.author || '').replace(/[^\d]/g, '')); // loose fallback
+                   allowedUsers.has(String(c.lastMessage?.author || '').replace(/[^\d]/g, ''));
           }
           return true;
         })
@@ -75,12 +72,11 @@ export function createConversationRoutes(sessionManager, io) {
         });
       }
 
-      if (lim && lim > 0) {
-        results = results.slice(0, lim);
-      }
+      if (lim && lim > 0) results = results.slice(0, lim);
 
       res.json({ conversations: results });
     } catch (error) {
+      if (error?.status) return handleAuthzError(res, error);
       res.status(500).json({ error: error.message });
     }
   });
