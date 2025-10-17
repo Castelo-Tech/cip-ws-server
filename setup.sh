@@ -21,6 +21,13 @@ apt-get install -y curl ca-certificates build-essential \
   libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxext6 \
   libxfixes3 libxrandr2 libxrender1 libxss1 libxtst6 wget xdg-utils
 
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "==> Installing ffmpeg for media conversion…"
+  apt-get install -y ffmpeg
+else
+  echo "==> ffmpeg already installed: $(ffmpeg -version | head -n1)"
+fi
+
 if ! command -v node >/dev/null 2>&1; then
   echo "==> Installing Node.js LTS…"
   curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
